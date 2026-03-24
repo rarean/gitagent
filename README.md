@@ -306,7 +306,7 @@ compliance:
 | `gitagent validate [--compliance]` | Validate against spec and regulatory requirements |
 | `gitagent info` | Display agent summary |
 | `gitagent export --format <fmt>` | Export to other formats (see adapters below) |
-| `gitagent import --from <fmt> <path>` | Import (`claude`, `cursor`, `crewai`, `opencode`) |
+| `gitagent import --from <fmt> <path>` | Import (`claude`, `cursor`, `crewai`, `opencode`, `kiro`) |
 | `gitagent run <source> --adapter <a>` | Run an agent from a git repo or local directory |
 | `gitagent install` | Resolve and install git-based dependencies |
 | `gitagent audit` | Generate compliance audit report |
@@ -360,6 +360,7 @@ Adapters are used by both `export` and `run`. Available adapters:
 | `openclaw` | OpenClaw format |
 | `nanobot` | Nanobot format |
 | `cursor` | Cursor `.cursor/rules/*.mdc` files |
+| `kiro` | Kiro CLI custom agent |
 
 ```bash
 # Export to system prompt
@@ -367,6 +368,40 @@ gitagent export --format system-prompt
 
 # Run an agent directly
 gitagent run ./my-agent --adapter lyzr
+```
+
+### Kiro Adapter
+
+Exports your agent into Kiro CLI's native format. Requires [`kiro-cli`](https://kiro.dev) to be installed.
+
+**Export** writes to `./kiro` in the current directory:
+
+```
+kiro/
+├── agents/<slug>.json          # agent config (model, MCP servers, hooks, resources)
+├── steering/<slug>-SOUL.md     # identity (from SOUL.md)
+├── steering/<slug>-RULES.md    # constraints (from RULES.md)
+├── steering/<slug>-DUTIES.md   # SOD policy (from DUTIES.md)
+├── steering/<slug>-PROMPT.md   # instructions (from AGENTS.md)
+├── steering/<slug>-COMPLIANCE.md  # generated from agent.yaml compliance block
+└── skills/<name>/SKILL.md      # copied from skills/
+```
+
+`tools/*.yaml` entries with `command`/`args` or `type: http` are mapped to `mcpServers` in the agent JSON. A `knowledge/` directory is added as a `knowledgeBase` resource.
+
+```bash
+# Export only
+gitagent export --format kiro
+
+# Export and launch kiro-cli chat
+gitagent run ./my-agent --adapter kiro
+```
+
+**Import** converts an existing Kiro project back to gitagent format. Accepts either a `.json` agent file or a directory containing `.kiro/agents/`:
+
+```bash
+gitagent import --from kiro /path/to/project
+gitagent import --from kiro /path/to/.kiro/agents/my-agent.json
 ```
 
 ## Inheritance & Composition

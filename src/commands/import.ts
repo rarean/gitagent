@@ -323,6 +323,139 @@ function importFromOpenCode(sourcePath: string, targetDir: string): void {
   }
 }
 
+// Steering file suffix → gitagent filename
+const STEERING_MAP: Record<string, string> = {
+  'SOUL': 'SOUL.md',
+  'RULES': 'RULES.md',
+  'DUTIES': 'DUTIES.md',
+  'PROMPT': 'AGENTS.md',
+  'MEMORY': 'memory/MEMORY.md',
+};
+
+function importFromKiro(sourcePath: string, targetDir: string): void {
+  const resolved = resolve(sourcePath);
+
+  // Accept either a .json file or a directory containing .kiro/agents/*.json
+  let jsonPath: string;
+  let kiroDir: string;
+  if (resolved.endsWith('.json') && existsSync(resolved)) {
+    jsonPath = resolved;
+    kiroDir = resolve(resolved, '..', '..', '..');
+  } else {
+    kiroDir = resolved;
+    const agentsDir = join(kiroDir, '.kiro', 'agents');
+    if (!existsSync(agentsDir)) throw new Error('.kiro/agents/ not found in source directory');
+    const files = readdirSync(agentsDir).filter(f => f.endsWith('.json'));
+    if (!files.length) throw new Error('No agent JSON files found in .kiro/agents/');
+    jsonPath = join(agentsDir, files[0]);
+  }
+
+  const agentJson = JSON.parse(readFileSync(jsonPath, 'utf-8')) as {
+    name?: string; description?: string; model?: string | null; prompt?: string;
+    mcpServers?: Record<string, { command?: string; args?: string[]; type?: string; url?: string; oauth?: unknown }>;
+    hooks?: { agentSpawn?: { command: string }[]; stop?: { command: string }[] };
+    tools?: string[];
+    toolAliases?: Record<string, unknown>;
+    allowedTools?: string[];
+    resources?: string[];
+    toolsSettings?: Record<string, unknown>;
+    includeMcpJson?: boolean;
+  };
+
+  const slug = (agentJson.name ?? basename(jsonPath, '.json')).toLowerCase().replace(/[^a-z0-9-]/g, '-');
+
+  // agent.yaml
+  const agentYaml: Record<string, unknown> = {
+    spec_version: '0.1.0',
+    name: slug,
+    version: '0.1.0',
+    description: agentJson.description ?? `Imported from Kiro agent: ${slug}`,
+  };
+  if (agentJson.model) agentYaml.model = { preferred: agentJson.model };
+  writeFileSync(join(targetDir, 'agent.yaml'), yaml.dump(agentYaml), 'utf-8');
+  success('Created agent.yaml');
+
+  // Steering files
+  const steeringDir = join(kiroDir, '.kiro', 'steering');
+  const written = new Set<string>();
+  if (existsSync(steeringDir)) {
+    const files = readdirSync(steeringDir).filter(f => f.endsWith('.md'));
+    for (const file of files) {
+      // Match prefixed (<slug>-SUFFIX.md) or bare (SUFFIX.md / *SUFFIX*.md)
+      const suffixMatch = file.match(/(?:^[^-]+-)?([A-Z]+)\.md$/) ?? file.match(/([A-Z]+)\.md$/);
+      const suffix = suffixMatch?.[1];
+      if (!suffix || suffix === 'COMPLIANCE') continue; // drop COMPLIANCE
+      const target = STEERING_MAP[suffix];
+      if (!target) continue;
+      const content = readFileSync(join(steeringDir, file), 'utf-8');
+      const outPath = join(targetDir, target);
+      mkdirSync(resolve(outPath, '..'), { recursive: true });
+      writeFileSync(outPath, content, 'utf-8');
+      written.add(target);
+      success(`Created ${target}`);
+    }
+  }
+
+  // prompt fallback → SOUL.md
+  if (!written.has('SOUL.md') && agentJson.prompt) {
+    let content = agentJson.prompt;
+    if (content.startsWith('file://')) {
+      const filePath = join(kiroDir, content.replace('file://', ''));
+      content = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : content;
+    }
+    writeFileSync(join(targetDir, 'SOUL.md'), content, 'utf-8');
+    success('Created SOUL.md (from prompt field)');
+  }
+
+  // Skills
+  const skillsDir = join(kiroDir, '.kiro', 'skills');
+  if (existsSync(skillsDir)) {
+    for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const skillMd = join(skillsDir, entry.name, 'SKILL.md');
+      if (!existsSync(skillMd)) continue;
+      const outDir = join(targetDir, 'skills', entry.name);
+      mkdirSync(outDir, { recursive: true });
+      writeFileSync(join(outDir, 'SKILL.md'), readFileSync(skillMd, 'utf-8'), 'utf-8');
+      success(`Imported skill: ${entry.name}`);
+    }
+  }
+
+  // mcpServers → tools/*.yaml
+  if (agentJson.mcpServers) {
+    mkdirSync(join(targetDir, 'tools'), { recursive: true });
+    for (const [name, server] of Object.entries(agentJson.mcpServers)) {
+      const toolYaml: Record<string, unknown> = { name };
+      if (server.command) {
+        toolYaml.command = server.command;
+        toolYaml.args = server.args ?? [];
+      } else if (server.type === 'http' && server.url) {
+        toolYaml.type = 'http';
+        toolYaml.url = server.url;
+        if (server.oauth) toolYaml.oauth = server.oauth;
+      }
+      writeFileSync(join(targetDir, 'tools', `${name}.yaml`), yaml.dump(toolYaml), 'utf-8');
+      success(`Created tools/${name}.yaml`);
+    }
+  }
+
+  // Hooks
+  const agentSpawn = agentJson.hooks?.agentSpawn;
+  const stop = agentJson.hooks?.stop;
+  if (agentSpawn?.length) {
+    mkdirSync(join(targetDir, 'hooks'), { recursive: true });
+    const cmds = agentSpawn.map(h => `\`\`\`sh\n${h.command}\n\`\`\``).join('\n\n');
+    writeFileSync(join(targetDir, 'hooks', 'bootstrap.md'), `# Bootstrap\n\n${cmds}\n`, 'utf-8');
+    success('Created hooks/bootstrap.md');
+  }
+  if (stop?.length) {
+    mkdirSync(join(targetDir, 'hooks'), { recursive: true });
+    const cmds = stop.map(h => `\`\`\`sh\n${h.command}\n\`\`\``).join('\n\n');
+    writeFileSync(join(targetDir, 'hooks', 'teardown.md'), `# Teardown\n\n${cmds}\n`, 'utf-8');
+    success('Created hooks/teardown.md');
+  }
+}
+
 function parseSections(markdown: string): [string, string][] {
   const sections: [string, string][] = [];
   const lines = markdown.split('\n');
@@ -351,7 +484,7 @@ function parseSections(markdown: string): [string, string][] {
 
 export const importCommand = new Command('import')
   .description('Import from other agent formats')
-  .requiredOption('--from <format>', 'Source format (claude, cursor, crewai, opencode)')
+  .requiredOption('--from <format>', 'Source format (claude, cursor, crewai, opencode, kiro)')
   .argument('<path>', 'Source file or directory path')
   .option('-d, --dir <dir>', 'Target directory', '.')
   .action((sourcePath: string, options: ImportOptions) => {
@@ -375,9 +508,12 @@ export const importCommand = new Command('import')
         case 'opencode':
           importFromOpenCode(sourcePath, targetDir);
           break;
+        case 'kiro':
+          importFromKiro(sourcePath, targetDir);
+          break;
         default:
           error(`Unknown format: ${options.from}`);
-          info('Supported formats: claude, cursor, crewai, opencode');
+          info('Supported formats: claude, cursor, crewai, opencode, kiro');
           process.exit(1);
       }
 
